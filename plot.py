@@ -51,41 +51,9 @@ class TimeRange:
     end: datetime
 
 
-def latest_timestamp(conn, family: str):
-    queries = {
-        "demand": "select max(ts) from grid.demand",
-        "prices": "select max(ts) from grid.prices",
-        "fuel_mix": "select max(ts) from grid.fuel_mix",
-        "capacity": "select max(interval_ts) from grid.capacity",
-        "outages": "select max(publication_ts) from grid.outages",
-        "reserve": """
-            select greatest(
-                coalesce((select max(ts) from grid.demand), '-infinity'::timestamptz),
-                coalesce((select max(interval_ts) from grid.capacity), '-infinity'::timestamptz)
-            )
-        """,
-    }
-
-    with conn.cursor() as cur:
-        cur.execute(queries[family])
-        return cur.fetchone()[0]
-
-
 def resolve_range(conn, family: str, start: str | None, end: str | None):
-    start_dt = parse_local_dt(start)
-    end_dt = parse_local_dt(end)
-
-    if end_dt is None:
-        latest = latest_timestamp(conn, family)
-        if latest is None:
-            raise RuntimeError(f"No data found for family {family}")
-        latest_local = latest.astimezone(CENTRAL)
-        end_date = latest_local.date() + timedelta(days=1)
-        end_dt = datetime.combine(end_date, time.min, tzinfo=CENTRAL)
-
-    if start_dt is None:
-        start_dt = end_dt - timedelta(days=730)
-
+    start_dt = parse_local_dt(start if start is not None else "2024-09-01")
+    end_dt = parse_local_dt(end if end is not None else "2026-09-01")
     if start_dt >= end_dt:
         raise SystemExit("Start must be before end (end is exclusive).")
     return TimeRange(start=start_dt, end=end_dt)
@@ -887,8 +855,8 @@ def add_common_args(p):
             "postgresql://ivie_user:ivie_secret@localhost:5432/ivie_db",
         ),
     )
-    p.add_argument("--start")
-    p.add_argument("--end")
+    p.add_argument("--start", help="Inclusive start (default: 2024-09-01)")
+    p.add_argument("--end", help="Exclusive end (default: 2026-09-01)")
     p.add_argument("--output")
     p.add_argument("--done")
     p.add_argument("--title")
