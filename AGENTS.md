@@ -2,19 +2,19 @@
 
 This repository contains an ERCOT grid-analysis demo.
 
-The user asks questions in natural English. Translate those questions into calls to `./plot4.py`, then briefly explain the result.
+The user asks questions in natural English. Translate those questions into calls to `./plot.py`, then briefly explain the result.
 
 ## Primary rule
 
-For ERCOT charting and analysis supported by `plot4.py`, use `./plot4.py`.
+For ERCOT charting and analysis supported by `plot.py`, use `./plot.py`.
 
 Do not write new plotting scripts.
 Do not generate charts directly.
-Do not replace `plot4.py` with ad hoc Python or SQL when the requested analysis is already supported.
+Do not replace `plot.py` with ad hoc Python or SQL when the requested analysis is already supported.
 
 Run commands silently. Do not narrate shell commands or implementation details to the user.
 
-`plot4.py` creates its own output filename under:
+`plot.py` creates its own output filename under:
 
 `./img/`
 
@@ -34,7 +34,7 @@ ERCOT data is interpreted in `America/Chicago`.
 
 When the user specifies a date or date range, use that range.
 
-When no range is specified, allow `plot4.py` to use its default two-year range. Do not invent a shorter range.
+When no range is specified, allow `plot.py` to use its default two-year range. Do not invent a shorter range.
 
 Interpret informal periods naturally:
 
@@ -56,7 +56,7 @@ Example question:
 Run:
 
 ```bash
-./plot4.py demand line --start 2026-08-01 --end 2026-09-01
+./plot.py demand line --start 2026-08-01 --end 2026-09-01
 ```
 
 ### Compare two demand periods
@@ -68,7 +68,7 @@ Example:
 Run:
 
 ```bash
-./plot4.py demand compare \
+./plot.py demand compare \
   --left-start 2026-08-01 \
   --left-end 2026-09-01 \
   --right-start 2025-08-01 \
@@ -84,7 +84,7 @@ Example:
 Run:
 
 ```bash
-./plot4.py demand compare \
+./plot.py demand compare \
   --left-start 2026-06-01 \
   --left-end 2026-09-01 \
   --right-start 2025-06-01 \
@@ -102,7 +102,7 @@ Example:
 Run:
 
 ```bash
-./plot4.py demand monthly
+./plot.py demand monthly
 ```
 
 ## Prices
@@ -116,7 +116,7 @@ Example:
 Run:
 
 ```bash
-./plot4.py prices daily \
+./plot.py prices daily \
   --start 2026-08-01 \
   --end 2026-09-01
 ```
@@ -130,7 +130,7 @@ Example:
 Run:
 
 ```bash
-./plot4.py prices yoy \
+./plot.py prices yoy \
   --start 2026-08-01 \
   --end 2026-09-01
 ```
@@ -144,7 +144,7 @@ Example:
 Run:
 
 ```bash
-./plot4.py prices spikes \
+./plot.py prices spikes \
   --start 2026-06-01 \
   --end 2026-09-01
 ```
@@ -158,7 +158,7 @@ Example:
 Run:
 
 ```bash
-./plot4.py prices monthly
+./plot.py prices monthly
 ```
 
 ## Generation / fuel mix
@@ -176,7 +176,7 @@ Example:
 Run:
 
 ```bash
-./plot4.py fuelmix stacked \
+./plot.py fuelmix stacked \
   --start 2026-08-01 \
   --end 2026-09-01
 ```
@@ -190,7 +190,7 @@ Example:
 Run:
 
 ```bash
-./plot4.py fuelmix selected \
+./plot.py fuelmix selected \
   --fuels Solar Wind \
   --start 2026-06-01 \
   --end 2026-09-01
@@ -205,7 +205,7 @@ Example:
 Run:
 
 ```bash
-./plot4.py fuelmix yoy \
+./plot.py fuelmix yoy \
   --fuels Gas Wind Solar Coal Nuclear \
   --start 2026-06-01 \
   --end 2026-09-01
@@ -220,7 +220,7 @@ Example:
 Run:
 
 ```bash
-./plot4.py fuelmix selected \
+./plot.py fuelmix selected \
   --fuels Gas Wind Solar Coal Nuclear \
   --start 2025-09-01 \
   --end 2026-09-01
@@ -237,7 +237,7 @@ Example:
 Run:
 
 ```bash
-./plot4.py outages monthly \
+./plot.py outages monthly \
   --start 2025-09-01 \
   --end 2026-09-01
 ```
@@ -251,7 +251,7 @@ Example:
 Run:
 
 ```bash
-./plot4.py outages seasonal \
+./plot.py outages seasonal \
   --left-start 2026-06-01 \
   --left-end 2026-09-01 \
   --right-start 2025-06-01 \
@@ -269,7 +269,7 @@ Example:
 Run:
 
 ```bash
-./plot4.py outages worst
+./plot.py outages worst
 ```
 
 ## Capacity vs demand
@@ -283,7 +283,7 @@ Example:
 Run:
 
 ```bash
-./plot4.py reserve line \
+./plot.py reserve line \
   --start 2026-08-01 \
   --end 2026-09-01
 ```
@@ -297,7 +297,7 @@ Example:
 Run:
 
 ```bash
-./plot4.py reserve lowest
+./plot.py reserve lowest
 ```
 
 ### Compare reserve margin
@@ -309,7 +309,7 @@ Example:
 Run:
 
 ```bash
-./plot4.py reserve compare \
+./plot.py reserve compare \
   --left-start 2026-06-01 \
   --left-end 2026-09-01 \
   --right-start 2025-06-01 \
@@ -326,7 +326,7 @@ Keep the response concise and conversational because it will also be spoken alou
 
 Prefer one to three short sentences highlighting the most important observation.
 
-Do not mention `plot4.py`, PostgreSQL, command-line arguments, filenames, the `img` directory, or the `dun` directory unless the user explicitly asks about implementation.
+Do not mention `plot.py`, PostgreSQL, command-line arguments, filenames, the `img` directory, or the `dun` directory unless the user explicitly asks about implementation.
 
 Do not describe the chart before running the command.
 
