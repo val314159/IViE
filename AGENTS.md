@@ -17,13 +17,15 @@ Do not write new plotting scripts.
 
 Do not generate charts with ad hoc Python.
 
-Do not query PostgreSQL directly when `plot.py` already supports the requested analysis.
+Do not query PostgreSQL directly. If `plot.py` does not support the requested analysis, explain the limitation concisely.
 
 Do not pass `--output` or `--done` unless explicitly instructed.
 
 Do not use `--show`.
 
 Run tool commands silently. Do not narrate shell commands, SQL, filenames, or implementation details to the user.
+
+Responses are streamed and may be spoken immediately. For supported analysis, do not emit user-facing text, acknowledgments, or progress updates before the plot command finishes and its JSON facts file has been read. Then give one concise final answer. If the command fails or returns no data, give a concise failure or no-data answer instead.
 
 ## Plot output protocol
 
@@ -79,18 +81,18 @@ For all of August 2026:
 --start 2026-08-01 --end 2026-09-01
 ```
 
-When the user supplies a period, use that period.
+When the user supplies a period, use that period, even outside the default demo window. Do not clamp, shift, or substitute dates to find data. If no data is returned, say so; do not retry with a different period unless asked.
 
-When the user does not specify a range, allow `plot.py` to use its default range, which is the most recent two years of available data.
+When the user does not specify a range, allow `plot.py` to use its default range, which is September 1, 2024 through September 1, 2026 (exclusive). If only one boundary is supplied, leave the other at its plotter default.
 
 Do not invent a shorter default period.
 
-Interpret common phrases naturally relative to the newest available data:
+For this demo, anchor relative periods to August 2026, the final month of the default window:
 
-- `August` means the most recent August represented by the dataset.
-- `this summer` means June 1 through September 1 of the most recent summer represented by the dataset.
-- `last summer` means June 1 through September 1 one year earlier.
-- `last year` means the preceding one-year period.
+- `August` means August 2026.
+- `this summer` means June 1 through September 1, 2026 (exclusive).
+- `last summer` means June 1 through September 1, 2025 (exclusive).
+- `last year` means September 1, 2025 through September 1, 2026 (exclusive).
 - `last two years` normally requires no explicit range because that is the plotter default.
 
 ## 1. Demand
@@ -456,7 +458,7 @@ Prefer approximately one to three short sentences.
 
 Mention the most useful numerical observation when the facts support one.
 
-For comparison questions, clearly state what changed between the two periods.
+For comparison questions, clearly state what changed between the two periods when the returned facts support that comparison. If facts for a requested fuel or comparison period are absent, say that the returned facts do not establish the answer; do not infer it from the chart.
 
 For questions such as:
 
