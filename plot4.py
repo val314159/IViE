@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import argparse
+import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, time
 from pathlib import Path
@@ -12,6 +13,8 @@ import psycopg
 
 
 CENTRAL = ZoneInfo("America/Chicago")
+DEFAULT_IMG_DIR = Path("./img")
+DEFAULT_DONE_DIR = Path("./dun")
 
 
 # ============================================================
@@ -30,17 +33,21 @@ def parse_local_dt(value: str | None):
 
     value = value.strip()
 
-    # YYYY-MM-DD
     if len(value) == 10:
         dt = datetime.fromisoformat(value)
         return dt.replace(tzinfo=CENTRAL)
 
-    # naive datetime
     dt = datetime.fromisoformat(value)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=CENTRAL)
 
     return dt
+
+
+@dataclass
+class TimeRange:
+    start: datetime
+    end: datetime
 
 
 def latest_timestamp(conn, family: str):
@@ -52,8 +59,8 @@ def latest_timestamp(conn, family: str):
         "outages": "select max(publication_ts) from grid.outages",
         "reserve": """
             select greatest(
-                (select max(ts) from grid.demand),
-                (select max(interval_ts) from grid.capacity)
+                coalesce((select max(ts) from grid.demand), '-infinity'::timestamptz),
+                coalesce((select max(interval_ts) from grid.capacity), '-infinity'::timestamptz)
             )
         """,
     }
@@ -61,12 +68,6 @@ def latest_timestamp(conn, family: str):
     with conn.cursor() as cur:
         cur.execute(queries[family])
         return cur.fetchone()[0]
-
-
-@dataclass
-class TimeRange:
-    start: datetime
-    end: datetime
 
 
 def resolve_range(conn, family: str, start: str | None, end: str | None):
@@ -87,20 +88,6 @@ def resolve_range(conn, family: str, start: str | None, end: str | None):
     return TimeRange(start=start_dt, end=end_dt)
 
 
-def maybe_save_show(fig, args):
-    fig.tight_layout()
-
-    if args.output:
-        output = Path(args.output)
-        output.parent.mkdir(parents=True, exist_ok=True)
-        fig.savefig(output, dpi=160)
-
-    if not args.no_show:
-        plt.show()
-
-    plt.close(fig)
-
-
 def read_sql_df(conn, sql, params=None):
     with conn.cursor() as cur:
         cur.execute(sql, params or {})
@@ -110,13 +97,58 @@ def read_sql_df(conn, sql, params=None):
 
 
 # ============================================================
+# Output / done-marker helpers
+# ============================================================
+
+def default_output_path():
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    return DEFAULT_IMG_DIR / f"img_{ts}.png"
+
+
+def finalize_plot(fig, args):
+    fig.tight_layout()
+
+    if args.output:
+        output = Path(args.output)
+    else:
+        output = default_output_path()
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+
+    if args.done:
+        done_path = Path(args.done)
+    else:
+        done_path = DEFAULT_DONE_DIR / output.name
+
+    if not done_path.parent.exists():
+        raise SystemExit(
+            f"Done directory does not exist: {done_path.parent}"
+        )
+
+    fig.savefig(output, dpi=160)
+
+    if args.show:
+        plt.show()
+
+    plt.close(fig)
+
+    done_path.touch()
+
+    # Print the chart path so callers can capture it if they want.
+    print(output)
+
+
+# ============================================================
 # Demand
+#   - line charts
+#   - comparisons
+#   - monthly trends
 # ============================================================
 
 def demand_line(conn, args):
     tr = resolve_range(conn, "demand", args.start, args.end)
 
-    sql = f"""
+    sql = """
         select
             date_trunc(%(bucket)s, ts) as t,
             avg(demand_mw) as demand_mw
@@ -142,7 +174,7 @@ def demand_line(conn, args):
     ax.set_xlabel("Time")
     ax.grid(True, alpha=0.3)
 
-    maybe_save_show(fig, args)
+    finalize_plot(fig, args)
 
 
 def demand_compare(conn, args):
@@ -189,7 +221,7 @@ def demand_compare(conn, args):
     ax.grid(True, alpha=0.3)
     ax.legend()
 
-    maybe_save_show(fig, args)
+    finalize_plot(fig, args)
 
 
 def demand_monthly(conn, args):
@@ -223,11 +255,15 @@ def demand_monthly(conn, args):
     ax.grid(True, alpha=0.3)
     ax.legend()
 
-    maybe_save_show(fig, args)
+    finalize_plot(fig, args)
 
 
 # ============================================================
 # Prices
+#   - daily averages
+#   - year-over-year comparison
+#   - top spikes
+#   - monthly averages
 # ============================================================
 
 def prices_daily(conn, args):
@@ -258,7 +294,38 @@ def prices_daily(conn, args):
     ax.set_xlabel("Date")
     ax.grid(True, alpha=0.3)
 
-    maybe_save_show(fig, args)
+    finalize_plot(fig, args)
+
+
+def prices_monthly(conn, args):
+    tr = resolve_range(conn, "prices", args.start, args.end)
+
+    sql = """
+        select
+            date_trunc('month', ts) as t,
+            avg(price) as avg_price
+        from grid.prices
+        where ts >= %(start)s
+          and ts < %(end)s
+          and (%(point)s is null or settlement_point = %(point)s)
+        group by 1
+        order by 1
+    """
+
+    df = read_sql_df(conn, sql, {
+        "start": tr.start,
+        "end": tr.end,
+        "point": args.point,
+    })
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.plot(df["t"], df["avg_price"])
+    ax.set_title(args.title or "Monthly average prices")
+    ax.set_ylabel("Average price")
+    ax.set_xlabel("Month")
+    ax.grid(True, alpha=0.3)
+
+    finalize_plot(fig, args)
 
 
 def prices_yoy(conn, args):
@@ -301,7 +368,7 @@ def prices_yoy(conn, args):
     ax.grid(True, alpha=0.3)
     ax.legend()
 
-    maybe_save_show(fig, args)
+    finalize_plot(fig, args)
 
 
 def prices_spikes(conn, args):
@@ -336,11 +403,14 @@ def prices_spikes(conn, args):
     ax.set_xlabel("Price")
     ax.set_ylabel("Timestamp")
 
-    maybe_save_show(fig, args)
+    finalize_plot(fig, args)
 
 
 # ============================================================
 # Fuel mix
+#   - stacked charts
+#   - selected fuels
+#   - year-over-year comparison
 # ============================================================
 
 def fuelmix_stacked(conn, args):
@@ -369,14 +439,18 @@ def fuelmix_stacked(conn, args):
     pivot = df.pivot(index="t", columns="fuel_type", values="generation_mw").fillna(0)
 
     fig, ax = plt.subplots(figsize=(12, 6))
-    ax.stackplot(pivot.index, [pivot[c] for c in pivot.columns], labels=list(pivot.columns))
+    ax.stackplot(
+        pivot.index,
+        [pivot[c] for c in pivot.columns],
+        labels=list(pivot.columns),
+    )
     ax.set_title(args.title or "Fuel mix (stacked)")
     ax.set_ylabel("MW")
     ax.set_xlabel("Time")
     ax.legend(loc="upper left", fontsize=8)
     ax.grid(True, alpha=0.3)
 
-    maybe_save_show(fig, args)
+    finalize_plot(fig, args)
 
 
 def fuelmix_selected(conn, args):
@@ -414,7 +488,7 @@ def fuelmix_selected(conn, args):
     ax.legend()
     ax.grid(True, alpha=0.3)
 
-    maybe_save_show(fig, args)
+    finalize_plot(fig, args)
 
 
 def fuelmix_yoy(conn, args):
@@ -466,11 +540,14 @@ def fuelmix_yoy(conn, args):
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
 
-    maybe_save_show(fig, args)
+    finalize_plot(fig, args)
 
 
 # ============================================================
 # Outages
+#   - monthly bars
+#   - seasonal comparisons
+#   - worst periods
 # ============================================================
 
 def outages_monthly(conn, args):
@@ -506,7 +583,7 @@ def outages_monthly(conn, args):
     ax.set_xlabel("Month")
     ax.tick_params(axis="x", rotation=45)
 
-    maybe_save_show(fig, args)
+    finalize_plot(fig, args)
 
 
 def outages_seasonal(conn, args):
@@ -550,7 +627,7 @@ def outages_seasonal(conn, args):
     ax.legend()
     ax.grid(True, alpha=0.3)
 
-    maybe_save_show(fig, args)
+    finalize_plot(fig, args)
 
 
 def outages_worst(conn, args):
@@ -583,16 +660,18 @@ def outages_worst(conn, args):
     ax.set_xlabel("Outage MW")
     ax.set_ylabel("Date")
 
-    maybe_save_show(fig, args)
+    finalize_plot(fig, args)
 
 
 # ============================================================
 # Capacity vs demand / reserve margin
+#   - paired lines
+#   - derived reserve_margin
+#   - lowest spare capacity
+#   - seasonal comparison
 # ============================================================
 
-def reserve_plot(conn, args):
-    tr = resolve_range(conn, "reserve", args.start, args.end)
-
+def reserve_base_df(conn, start, end, bucket, region):
     sql = """
         with latest_capacity as (
             select distinct on (interval_ts)
@@ -624,18 +703,24 @@ def reserve_plot(conn, args):
             dem.t,
             dem.demand_mw,
             cap.available_mw,
+            (cap.available_mw - dem.demand_mw) as spare_capacity_mw,
             (cap.available_mw - dem.demand_mw) / nullif(dem.demand_mw, 0) as reserve_margin
         from dem
         join cap using (t)
         order by dem.t
     """
 
-    df = read_sql_df(conn, sql, {
-        "bucket": args.bucket,
-        "region": args.region,
-        "start": tr.start,
-        "end": tr.end,
+    return read_sql_df(conn, sql, {
+        "bucket": bucket,
+        "region": region,
+        "start": start,
+        "end": end,
     })
+
+
+def reserve_line(conn, args):
+    tr = resolve_range(conn, "reserve", args.start, args.end)
+    df = reserve_base_df(conn, tr.start, tr.end, args.bucket, args.region)
 
     fig, ax = plt.subplots(figsize=(12, 6))
     ax.plot(df["t"], df["demand_mw"], label="Demand MW")
@@ -647,20 +732,69 @@ def reserve_plot(conn, args):
     ax.legend()
     ax.grid(True, alpha=0.3)
 
-    maybe_save_show(fig, args)
+    finalize_plot(fig, args)
+
+
+def reserve_lowest(conn, args):
+    tr = resolve_range(conn, "reserve", args.start, args.end)
+    df = reserve_base_df(conn, tr.start, tr.end, args.bucket, args.region)
+    df = df.nsmallest(args.top_n, "spare_capacity_mw").sort_values("spare_capacity_mw", ascending=True)
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    labels = df["t"].dt.strftime("%Y-%m-%d %H:%M")
+    ax.barh(labels, df["spare_capacity_mw"])
+    ax.set_title(args.title or f"Lowest {args.top_n} spare-capacity eriods")
+    ax.set_xlabel("Spare capacity MW")
+    ax.set_ylabel("Timestamp")
+
+    finalize_plot(fig, args)
+
+
+def reserve_compare(conn, args):
+    left_start = parse_local_dt(args.left_start)
+    left_end = parse_local_dt(args.left_end)
+    right_start = parse_local_dt(args.right_start)
+    right_end = parse_local_dt(args.right_end)
+
+    if None in (left_start, left_end, right_start, right_end):
+        raise SystemExit("reserve compare requires all four period arguments")
+
+    left = reserve_base_df(conn, left_start, left_end, "day", args.region)
+    right = reserve_base_df(conn, right_start, right_end, "day", args.region)
+
+    left["idx"] = range(1, len(left) + 1)
+    right["idx"] = range(1, len(right) + 1)
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    ax.plot(left["idx"], left["reserve_margin"] * 100.0, label=args.left_label or "Period A")
+    ax.plot(right["idx"], right["reserve_margin"] * 100.0, label=args.right_label or "Period B")
+    ax.set_title(args.title or "Reserve margin comparison")
+    ax.set_xlabel("Day in period")
+    ax.set_ylabel("Reserve margin %")
+    ax.legend()
+    ax.grid(True, alpha=0.3)
+
+    finalize_plot(fig, args)
 
 
 # ============================================================
 # CLI
 # ============================================================
 
-def add_common_plot_args(p):
-    p.add_argument("--db", default="postgresql://ivie_user:ivie_secret@localhost:5432/ivie_db")
+def add_common_args(p):
+    p.add_argument(
+        "--db",
+        default=os.environ.get(
+            "DATABASE_URL",
+            "postgresql://ivie_user:ivie_secret@localhost:5432/ivie_db",
+        ),
+    )
     p.add_argument("--start")
     p.add_argument("--end")
     p.add_argument("--output")
-    p.add_argument("--no-show", action="store_true")
+    p.add_argument("--done")
     p.add_argument("--title")
+    p.add_argument("--show", action="store_true")
 
 
 def build_parser():
@@ -672,13 +806,13 @@ def build_parser():
     demand_sub = demand.add_subparsers(dest="mode", required=True)
 
     p = demand_sub.add_parser("line")
-    add_common_plot_args(p)
+    add_common_args(p)
     p.add_argument("--region", default="ERCOT")
     p.add_argument("--bucket", choices=["hour", "day", "week", "month"], default="day")
-    p.set_defaults(func=demand_line, family="demand")
+    p.set_defaults(func=demand_line)
 
     p = demand_sub.add_parser("compare")
-    add_common_plot_args(p)
+    add_common_args(p)
     p.add_argument("--region", default="ERCOT")
     p.add_argument("--left-start", required=True)
     p.add_argument("--left-end", required=True)
@@ -686,85 +820,111 @@ def build_parser():
     p.add_argument("--right-end", required=True)
     p.add_argument("--left-label")
     p.add_argument("--right-label")
-    p.set_defaults(func=demand_compare, family="demand")
+    p.set_defaults(func=demand_compare)
 
     p = demand_sub.add_parser("monthly")
-    add_common_plot_args(p)
+    add_common_args(p)
     p.add_argument("--region", default="ERCOT")
-    p.set_defaults(func=demand_monthly, family="demand")
+    p.set_defaults(func=demand_monthly)
 
     # 2) Prices
     prices = sub.add_parser("prices")
     prices_sub = prices.add_subparsers(dest="mode", required=True)
 
     p = prices_sub.add_parser("daily")
-    add_common_plot_args(p)
+    add_common_args(p)
     p.add_argument("--point")
-    p.set_defaults(func=prices_daily, family="prices")
+    p.set_defaults(func=prices_daily)
+
+    p = prices_sub.add_parser("monthly")
+    add_common_args(p)
+    p.add_argument("--point")
+    p.set_defaults(func=prices_monthly)
 
     p = prices_sub.add_parser("yoy")
-    add_common_plot_args(p)
+    add_common_args(p)
     p.add_argument("--point")
-    p.set_defaults(func=prices_yoy, family="prices")
+    p.set_defaults(func=prices_yoy)
 
     p = prices_sub.add_parser("spikes")
-    add_common_plot_args(p)
+    add_common_args(p)
     p.add_argument("--point")
     p.add_argument("--top-n", type=int, default=20)
-    p.set_defaults(func=prices_spikes, family="prices")
+    p.set_defaults(func=prices_spikes)
 
     # 3) Fuel mix
     fuel = sub.add_parser("fuelmix")
     fuel_sub = fuel.add_subparsers(dest="mode", required=True)
 
     p = fuel_sub.add_parser("stacked")
-    add_common_plot_args(p)
+    add_common_args(p)
     p.add_argument("--settlement-type", default="INITIAL")
     p.add_argument("--bucket", choices=["hour", "day", "week", "month"], default="day")
-    p.set_defaults(func=fuelmix_stacked, family="fuel_mix")
+    p.set_defaults(func=fuelmix_stacked)
 
     p = fuel_sub.add_parser("selected")
-    add_common_plot_args(p)
-    p.add_argument("--settlemnt-type", default="INITIAL")
+    add_common_args(p)
+    p.add_argument("--settlement-type", default="INITIAL")
     p.add_argument("--bucket", choices=["hour", "day", "week", "month"], default="day")
     p.add_argument("--fuels", nargs="+", required=True)
-    p.set_defaults(func=fuelmix_selected, family="fuel_mix")
+    p.set_defaults(func=fuelmix_selected)
 
     p = fuel_sub.add_parser("yoy")
-    add_common_plot_args(p)
+    add_common_args(p)
     p.add_argument("--settlement-type", default="INITIAL")
     p.add_argument("--fuels", nargs="+", required=True)
-    p.set_defaults(func=fuelmix_yoy, family="fuel_mix")
+    p.set_defaults(func=fuelmix_yoy)
 
     # 4) Outages
     outages = sub.add_parser("outages")
     outages_sub = outages.add_subparsers(dest="mode", required=True)
 
     p = outages_sub.add_parser("monthly")
-    add_common_plot_args(p)
-    p.set_defaults(func=outages_monthly, family="outages")
+    add_common_args(p)
+    p.set_defaults(func=outages_monthly)
 
     p = outages_sub.add_parser("seasonal")
-    add_common_plot_args(p)
+    add_common_args(p)
     p.add_argument("--left-start", required=True)
     p.add_argument("--left-end", required=True)
     p.add_argument("--right-start", required=True)
     p.add_argument("--right-end", required=True)
     p.add_argument("--left-label")
     p.add_argument("--right-label")
-    p.set_defaults(func=outages_seasonal, family="outages")
+    p.set_defaults(func=outages_seasonal)
 
     p = outages_sub.add_parser("worst")
-    add_common_plot_args(p)
+    add_common_args(p)
     p.add_argument("--top-n", type=int, default=20)
-    p.set_defaults(func=outages_worst, family="outages")
+    p.set_defaults(func=outages_worst)
 
-    # 5) Capacity vs demand
+    # 5) Reserve / capacity vs demand
     reserve = sub.add_parser("reserve")
-    add_common_plot_args(reserve)
-    reserve.add_argument("--region", default="ERCOT")
-    reserve.add_argument("--bucket", choices=["hour", "day", "week", "month"], default="day")
-    reserve.set_defaults(func=reserve_plot, family="reserve")
+    reserve_sub = reserve.add_subparsers(dest="mode", required=True)
+
+    p = reserve_sub.add_parser("line")
+    add_common_args(p)
+    p.add_argument("--region", default="ERCOT")
+    p.add_argument("--bucket", choices=["hour", "day", "week", "month"], default="day")
+    p.set_defaults(func=reserve_line)
+
+    p = reserve_sub.add_parser("lowest")
+    add_common_args(p)
+    p.add_argument("--region", default="ERCOT")
+    p.add_argument("--bucket", choices=["hour", "day", "week", "month"], default="day")
+    p.add_argument("--top-n", type=int, default=20)
+    p.set_defaults(func=reserve_lowest)
+
+    p = reserve_sub.add_parser("compare")
+    add_common_args(p)
+    p.add_argument("--region", default="ERCOT")
+    p.add_argument("--left-start", required=True)
+    p.add_argument("--left-end", required=True)
+    p.add_argument("--right-start", required=True)
+    p.add_argument("--right-end", required=True)
+    p.add_argument("--left-label")
+    p.add_argument("--right-label")
+    p.set_defaults(func=reserve_compare)
 
     return parser
 
