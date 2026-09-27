@@ -1,18 +1,23 @@
-Y Show me electricity demand for August 2026.
-Y Compare August 2026 demand with August 2025.
-Y Compare this summer with last summer.
-Y Show monthly demand for the last two years.
-N Show average daily power prices for August.
-N Compare August prices with last August.
-N Show me the biggest price spikes this summer.
-N Show monthly average prices over the last two years.
-N Show the generation mix for August.
-N How did solar and wind change this summer?
-N Compare the generation mix this summer with last summer.
-N Show gas, wind, solar, coal and nuclear over the last year.
-Y Show outages by month for the last year.
-Y Were outages higher this summer than last summer?
-Y Show the worst outage periods.
-Y Show available capacity versus demand for August.
-Y When did the grid have the least spare capacity?
-Y Compare reserve margin this summer with last summer.
+IViE is the Interactive Visualization Engine.
+
+Instead of trusting an LLM to process queries and calculations,
+IViE puts a Domain-Specific Language between the model and the data.
+
+For this implementation, that DSL is exposed through `plot.py`.
+It talks to postgres and uses matplotlib to render charts.
+
+For this demo, IViE is running against two years of ERCOT Texas grid data.
+Let's see how it works.
+
+[ ] Show me electricity demand for August 2026.
+[ ] Compare August 2026 demand with August 2025.
+[ ] Compare this summer with last summer.
+[ ] Show monthly demand for the last two years.
+
+[ ] Show outages by month for the last year.
+[ ] Were outages higher this summer than last summer?
+[ ] Show the worst outage periods.
+
+[ ] Show available capacity versus demand for August.
+[ ] When did the grid have the least spare capacity?
+[ ] Compare reserve margin this summer with last summer.
