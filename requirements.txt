@@ -1,0 +1,7 @@
+psycopg[binary]
+python-dateutil
+websocket-client
+gevent-websocket
+bottle-dev
+matplotlib
+pandas
