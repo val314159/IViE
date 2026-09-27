@@ -76,7 +76,13 @@
       <div class="border-t border-slate-800 p-4 bg-slate-900/60">
         <div class="flex items-center justify-between mb-2">
           <span class="text-xs uppercase tracking-wider text-slate-500">Input</span>
-          <span id="micStatus" class="text-xs text-slate-500">Voice off</span>
+          <div class="flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-xs">
+            <span class="flex items-center gap-1.5" role="status" aria-live="polite">
+              <span id="speechDot" class="w-2 h-2 rounded-full bg-slate-500"></span>
+              <span id="speechStatus" class="text-slate-400">Audio idle</span>
+            </span>
+            <span id="micStatus" class="text-slate-500">Voice off</span>
+          </div>
         </div>
 
         <div
@@ -118,6 +124,52 @@
             Send
           </button>
         </div>
+        <div class="flex items-center gap-3 mt-3">
+          <button id="runDemo" type="button" disabled
+            class="px-3 py-2 rounded-lg bg-violet-700 hover:bg-violet-600 text-sm disabled:opacity-30">
+            Run demo
+          </button>
+          <span id="demoStatus" class="text-xs text-slate-400" role="status">Four-question rehearsal</span>
+        </div>
+        <details class="mt-2 text-xs text-slate-400">
+          <summary class="cursor-pointer">Demo settings &amp; timings</summary>
+          <div class="mt-2 max-h-64 overflow-y-auto space-y-2">
+            <div class="flex flex-wrap items-center gap-2">
+              <label>Mode
+                <select id="demoMode" class="bg-slate-800 rounded p-1">
+                  <option value="demo">Demo with speech</option>
+                  <option value="fast">Fast backend test (silent)</option>
+                </select>
+              </label>
+              <label>Pause (seconds)
+                <input id="demoPause" type="number" min="0" max="30" step="0.5" value="2"
+                  class="w-16 bg-slate-800 rounded p-1">
+              </label>
+            </div>
+            <label class="block">Questions (one per line)
+              <textarea id="demoQuestions" rows="18" class="mt-1 w-full bg-slate-950 border border-slate-700 rounded p-2">Show me electricity demand for August 2026.
+Compare August 2026 demand with August 2025.
+Compare this summer with last summer.
+Show monthly demand for the last two years.
+Show average daily power prices for August.
+Compare August prices with last August.
+Show me the biggest price spikes this summer.
+Show monthly average prices over the last two years.
+Show the generation mix for August.
+How did solar and wind change this summer?
+Compare the generation mix this summer with last summer.
+Show gas, wind, solar, coal and nuclear over the last year.
+Show outages by month for the last year.
+Were outages higher this summer than last summer?
+Show the worst outage periods.
+Show available capacity versus demand for August.
+When did the grid have the least spare capacity?
+Compare reserve margin this summer with last summer.</textarea>
+            </label>
+            <p>Stop prevents the next question; the current answer finishes. Timings do not validate answer accuracy.</p>
+            <ol id="demoResults" class="space-y-2"></ol>
+          </div>
+        </details>
       </div>
     </section>
 
@@ -149,8 +201,16 @@
   const statusEl = $("status");
   const statusDot = $("statusDot");
   const micStatus = $("micStatus");
+  const speechDot = $("speechDot");
+  const speechStatus = $("speechStatus");
   const chart = $("chart");
   const chartEmpty = $("chartEmpty");
+  const runDemoBtn = $("runDemo");
+  const demoStatus = $("demoStatus");
+  const demoMode = $("demoMode");
+  const demoPause = $("demoPause");
+  const demoQuestions = $("demoQuestions");
+  const demoResults = $("demoResults");
 
   const wsScheme = location.protocol === "https:" ? "wss" : "ws";
 
@@ -175,6 +235,12 @@
 
   let ttsBuffer = "";
   const pendingSpeech = [];
+  let responsePending = false;
+  let ttsInFlight = 0; // One EOF per text message sent to MeloYelo.
+  let acceptVoiceInput = true;
+  let speakThisTurn = true;
+  let demoRun = null;
+  const DEMO_TIMEOUT_MS = 180000;
 
   // =======================================================
   // Status: green ready, yellow working, red disconnected
@@ -192,7 +258,7 @@
         ? "bg-yellow-400"
         : "bg-red-500");
 
-    sendBtn.disabled = state !== "ready";
+    sendBtn.disabled = state !== "ready" || !!demoRun;
   }
 
   // =======================================================
@@ -277,6 +343,8 @@
     currentCommentary = null;
     currentFinal = null;
     ttsBuffer = "";
+    responsePending = true;
+    updateSpeechStatus();
 
     createBubble("user", text);
   }
@@ -365,11 +433,15 @@
     ws.onclose = () => {
       if (ws !== appWs) return;
       appWs = null;
+      finishDemo("Stopped: connection lost");
+      responsePending = false;
+      flushSpeech(true);
+      updateSpeechStatus();
       setState("disconnected", "Reconnecting");
       scheduleReconnect();
     };
 
-  ws.onerror = () => {
+  ws.onerror = event => {
     console.error("Websocket:", event.error, event.message);
   };
   }
@@ -386,6 +458,9 @@
   function handleAppMessage(msg) {
     switch (msg.type) {
       case "snapshot":
+        responsePending = !!msg.busy;
+        if (!responsePending) flushSpeech(true);
+        updateSpeechStatus();
         setState(
           msg.busy ? "working" : "ready",
           msg.busy ? (msg.status || "Working") : "Ready"
@@ -419,13 +494,21 @@
         break;
 
       case "done":
+        if (demoRun?.current && demoRun.current.backendMs === null)
+          demoRun.current.backendMs = performance.now() - demoRun.current.started;
         removeInternal();
         flushSpeech(true);
+        responsePending = false;
+        updateSpeechStatus();
         setState("ready", "Ready");
         break;
 
       case "error":
+        finishDemo(`Stopped: ${msg.text || "server error"}`);
         removeInternal();
+        flushSpeech(true);
+        responsePending = false;
+        updateSpeechStatus();
         setState("ready", "Ready");
         createBubble("chatter", `Error: ${msg.text || "Unknown error"}`);
         break;
@@ -461,14 +544,16 @@
       .trim();
   }
 
-  function sendQuestion() {
-    if (appState !== "ready") return;
-    if (!appWs || appWs.readyState !== WebSocket.OPEN) return;
+  function sendQuestion(demoText = null) {
+    if (demoRun && typeof demoText !== "string") return false;
+    if (appState !== "ready") return false;
+    if (!appWs || appWs.readyState !== WebSocket.OPEN) return false;
 
-    const text = completeInput();
-    if (!text) return;
+    const text = typeof demoText === "string" ? demoText : completeInput();
+    if (!text) return false;
 
-    ensureAudio();
+    speakThisTurn = !demoRun?.fast;
+    if (speakThisTurn) ensureAudio();
     beginTurn(text);
 
     appWs.send(JSON.stringify({
@@ -481,10 +566,100 @@
     autoGrowInput();
 
     setState("working", "Working");
-    restartRecognitionAfterSend();
+    return true;
   }
 
-  sendBtn.addEventListener("click", sendQuestion);
+  sendBtn.addEventListener("click", () => sendQuestion());
+
+  // Sequential runner on the existing socket: never overlap requests or replay
+  // after a disconnect. Backend time ends at done; total includes speech drain.
+  demoMode.addEventListener("change", () => {
+    demoPause.value = demoMode.value === "fast" ? "0" : "2";
+  });
+
+  function finishDemo(reason) {
+    if (!demoRun) return;
+    const run = demoRun;
+    if (run.current && !run.current.finished) {
+      run.current.row.textContent += ` — ${reason}`;
+    }
+    demoStatus.textContent = `${reason} · ${((performance.now() - run.started) / 1000).toFixed(1)}s total`;
+    demoRun = null;
+    updateSpeechStatus();
+    updateDemoControls();
+  }
+
+  function updateDemoControls() {
+    runDemoBtn.textContent = demoRun ? "Stop demo" : "Run demo";
+    runDemoBtn.disabled = !demoRun && (appState !== "ready" || !acceptVoiceInput);
+    demoMode.disabled = demoPause.disabled = demoQuestions.disabled = !!demoRun;
+    input.readOnly = !!demoRun;
+    sendBtn.disabled = appState !== "ready" || !!demoRun;
+  }
+
+  function nextDemoQuestion() {
+    const run = demoRun;
+    if (!run) return;
+    const text = run.questions[run.index++];
+    const row = document.createElement("li");
+    row.textContent = `${run.index}. ${text}`;
+    demoResults.appendChild(row);
+    run.current = { row, started: performance.now(), backendMs: null, finished: false };
+    run.nextAt = null;
+    demoStatus.textContent = `${run.index}/${run.questions.length} · ${run.fast ? "Testing" : "Rehearsing"}`;
+    if (!sendQuestion(text)) finishDemo("Stopped: server not ready");
+  }
+
+  function tickDemo() {
+    updateDemoControls();
+    const run = demoRun;
+    if (!run?.current) return;
+    const now = performance.now();
+    const current = run.current;
+    if (!current.finished && now - current.started > DEMO_TIMEOUT_MS) {
+      finishDemo("Stopped: response exceeded 180s");
+      return;
+    }
+    if (current.backendMs === null || appState !== "ready" || !acceptVoiceInput) return;
+    if (!current.finished) {
+      current.finished = true;
+      current.row.textContent += ` — backend ${(current.backendMs / 1000).toFixed(1)}s; total ${((now - current.started) / 1000).toFixed(1)}s`;
+      if (run.index === run.questions.length) {
+        finishDemo(`Completed ${run.index}/${run.questions.length}`);
+        return;
+      }
+      run.nextAt = now + run.pauseMs;
+      demoStatus.textContent = `${run.index}/${run.questions.length} complete · pause ${run.pauseMs / 1000}s`;
+    }
+    if (now >= run.nextAt) nextDemoQuestion();
+  }
+
+  runDemoBtn.addEventListener("click", async () => {
+    if (demoRun) { finishDemo("Stopped by you"); return; }
+    if (appState !== "ready" || !acceptVoiceInput) return;
+    const questions = demoQuestions.value.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    if (!questions.length) { demoStatus.textContent = "Add at least one question"; return; }
+    const pause = Number(demoPause.value);
+    if (!Number.isFinite(pause) || pause < 0 || pause > 30) {
+      demoStatus.textContent = "Pause must be between 0 and 30 seconds";
+      return;
+    }
+    const run = demoRun = { questions, pauseMs: pause * 1000,
+      fast: demoMode.value === "fast", index: 0, current: null, started: performance.now() };
+    demoResults.textContent = "";
+    interim.textContent = "";
+    updateSpeechStatus();
+    updateDemoControls();
+    try {
+      if (!run.fast) {
+        await ensureAudio();
+        if (!audioContext || audioContext.state !== "running") throw new Error("audio unavailable");
+      }
+      if (demoRun === run) nextDemoQuestion();
+    } catch (error) {
+      if (demoRun === run) finishDemo(`Stopped: ${error.message}`);
+    }
+  });
 
   document.addEventListener("keydown", event => {
     if (event.code !== "Space") return;
@@ -510,10 +685,11 @@
     window.webkitSpeechRecognition;
 
   let recognition = null;
+  let micTrack = null;
   let voiceWanted = false;
   let recognitionRunning = false;
-  let discardRecognition = false;
-  let recognitionResumeAt = 0;
+  let recognitionStarting = false;
+  const ignoredRecognition = new Set();
 
   function appendCommitted(text) {
     text = text.trim();
@@ -526,38 +702,34 @@
   }
 
   function recognitionSuppressed() {
-    return (
-      discardRecognition ||
-      Date.now() < recognitionResumeAt ||
-      isSpeaking()
-    );
+    updateSpeechStatus();
+    return !acceptVoiceInput || !!demoRun;
   }
 
-  function startRecognition() {
-    if (!recognition || !voiceWanted || recognitionRunning) return;
+  async function startRecognition() {
+    if (!recognition || !voiceWanted || recognitionRunning || recognitionStarting) return;
+    recognitionStarting = true;
 
-    const wait = recognitionResumeAt - Date.now();
-    if (wait > 0) {
-      setTimeout(startRecognition, wait + 10);
-      return;
+    try {
+      if (!micTrack || micTrack.readyState === "ended") {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        micTrack = stream.getAudioTracks()[0];
+      }
+      updateSpeechStatus();
+      if (!voiceWanted) {
+        recognitionStarting = false;
+        return;
+      }
+      // Recognition must consume this track for enabled=false to mute its input.
+      recognition.start(micTrack);
+    } catch (error) {
+      recognitionStarting = false;
+      voiceWanted = false;
+      updateSpeechStatus();
+      voiceBtn.textContent = "Start voice";
+      micStatus.textContent = `Microphone error: ${error.message}`;
+      console.error("Microphone:", error);
     }
-
-    try {
-      recognition.start();
-    } catch {}
-  }
-
-  function restartRecognitionAfterSend() {
-    if (!recognition || !voiceWanted) return;
-
-    discardRecognition = true;
-    recognitionResumeAt = Date.now() + 300;
-
-    try {
-      recognition.stop();
-    } catch {}
-
-    interim.textContent = "";
   }
 
   if (SpeechRecognition) {
@@ -568,35 +740,41 @@
     recognition.maxAlternatives = 1;
 
     recognition.onstart = () => {
+      recognitionStarting = false;
       recognitionRunning = true;
+      ignoredRecognition.clear();
       voiceBtn.textContent = "Stop voice";
-      micStatus.textContent = "Listening";
+      updateSpeechStatus();
     };
 
     recognition.onend = () => {
+      recognitionStarting = false;
       recognitionRunning = false;
 
       if (!voiceWanted) {
         voiceBtn.textContent = "Start voice";
-        micStatus.textContent = "Voice off";
         return;
       }
 
-      const delay = Math.max(50, recognitionResumeAt - Date.now());
-      setTimeout(() => {
-        discardRecognition = false;
-        startRecognition();
-      }, delay);
+      updateSpeechStatus();
+      setTimeout(startRecognition, 50);
     };
 
     recognition.onresult = event => {
-      if (recognitionSuppressed()) return;
+      const suppressed = recognitionSuppressed() || !voiceWanted;
 
       let live = "";
 
       for (let i = event.resultIndex; i < event.results.length; i++) {
         const result = event.results[i];
         const text = result[0].transcript;
+
+        // A suppressed interim result may become final after playback ends.
+        if (suppressed || ignoredRecognition.has(i)) {
+          if (result.isFinal) ignoredRecognition.delete(i);
+          else ignoredRecognition.add(i);
+          continue;
+        }
 
         if (result.isFinal)
           appendCommitted(text);
@@ -607,30 +785,23 @@
       interim.textContent = live.trim();
     };
 
-    recognition.onerror = event => {/*
-      if (
-        event.error === "not-allowed" ||
-        event.error === "service-not-allowed"
-      ) {
-        voiceWanted = false;
-        voiceBtn.disabled = true;
-        voiceBtn.textContent = "Voice unavailable";
-        micStatus.textContent = "Microphone denied";
-    }
-*/    
-  console.error("Speech recognition:", event.error, event.message);
-  voiceWanted = false; // Stop automatic retries after an error.
-  discardRecognition = false;
-  interim.textContent = `Speech error: ${event.error}`;
+    recognition.onerror = event => {
+      // Muting feeds silence. A no-speech timeout should allow onend to restart.
+      if (event.error === "no-speech") return;
+      console.error("Speech recognition:", event.error, event.message);
+      voiceWanted = false; // Stop automatic retries after other errors.
+      interim.textContent = "";
+      updateSpeechStatus();
+      voiceBtn.textContent = "Start voice";
+      micStatus.textContent = `Speech error: ${event.error}`;
     };
 
     voiceBtn.addEventListener("click", async () => {
       await ensureAudio();
       voiceWanted = !voiceWanted;
+      updateSpeechStatus();
 
       if (voiceWanted) {
-        discardRecognition = false;
-        recognitionResumeAt = 0;
         startRecognition();
       } else {
         interim.textContent = "";
@@ -668,21 +839,33 @@
 
     ws.onopen = () => {
       if (ws !== audioWs) return;
-      while (pendingSpeech.length)
+      while (pendingSpeech.length) {
         ws.send(pendingSpeech.shift());
+        ttsInFlight++;
+      }
+      updateSpeechStatus();
     };
 
     ws.onmessage = event => {
       if (ws !== audioWs) return;
 
       // app.py strips timing metadata. Text frames are controls (EOF).
-      if (typeof event.data === "string") return;
+      if (typeof event.data === "string") {
+        if (event.data === "EOF") {
+          ttsInFlight = Math.max(0, ttsInFlight - 1);
+          updateSpeechStatus();
+        }
+        return;
+      }
       schedulePcm(event.data);
     };
 
     ws.onclose = () => {
       if (ws !== audioWs) return;
       audioWs = null;
+      if (demoRun && !demoRun.fast) finishDemo("Stopped: audio connection lost");
+      ttsInFlight = 0; // This connection can no longer deliver its EOFs.
+      updateSpeechStatus();
       audioReconnectTimer = setTimeout(connectAudio, 1000);
     };
 
@@ -695,6 +878,7 @@
 
     if (audioWs && audioWs.readyState === WebSocket.OPEN) {
       audioWs.send(text);
+      ttsInFlight++;
       return;
     }
 
@@ -712,8 +896,11 @@
   }
 
   function queueSpeech(delta) {
+    if (!speakThisTurn) return;
+    responsePending = true;
     ttsBuffer += delta;
     flushSpeech(false);
+    updateSpeechStatus();
   }
 
   function flushSpeech(force) {
@@ -789,11 +976,38 @@
     const start = Math.max(playbackEnd, audioContext.currentTime);
     source.start(start);
     playbackEnd = start + buffer.duration;
+    updateSpeechStatus();
   }
 
-  function isSpeaking() {
-    if (!audioContext) return false;
-    return audioContext.currentTime < playbackEnd + 0.300;
+  // Keep recognition running; mute its mic track and reject results until the
+  // response, every TTS request (EOF), and playback finish, plus an echo tail.
+  // An empty PCM queue alone is not enough: the next chunk may still be coming.
+  function updateSpeechStatus() {
+    const queuedAudio = audioContext && audioContext.currentTime < playbackEnd;
+    const playing = queuedAudio && audioContext.state === "running";
+    const tail = audioContext && playbackEnd > 0 &&
+      audioContext.currentTime < playbackEnd + 0.300;
+    const waitingAudio = ttsInFlight > 0 || pendingSpeech.length > 0 ||
+      !!ttsBuffer.trim();
+    acceptVoiceInput = !(responsePending || waitingAudio || tail);
+    const micEnabled = voiceWanted && acceptVoiceInput && !demoRun;
+    if (micTrack && micTrack.enabled !== micEnabled) micTrack.enabled = micEnabled;
+    if (!acceptVoiceInput) interim.textContent = "";
+
+    const label = playing ? "IViE speaking"
+      : queuedAudio ? "Audio paused"
+      : waitingAudio ? "Waiting for audio"
+      : responsePending ? "Waiting for IViE"
+      : tail ? "Audio finishing"
+      : demoRun ? "Demo running"
+      : voiceWanted ? "Ready to listen" : "Audio idle";
+    if (speechStatus.textContent !== label) speechStatus.textContent = label;
+    speechDot.className = "w-2 h-2 rounded-full " +
+      (!acceptVoiceInput || demoRun ? "bg-amber-400" : voiceWanted ? "bg-green-500" : "bg-slate-500");
+    if (voiceWanted) {
+      micStatus.textContent = !recognitionRunning ? "Starting voice"
+        : micEnabled ? "Listening" : "Microphone muted";
+    }
   }
 
   // =======================================================
@@ -801,6 +1015,7 @@
   // =======================================================
 
   autoGrowInput();
+  setInterval(() => { updateSpeechStatus(); tickDemo(); }, 50);
   connectApp();
   connectAudio();
 })();

@@ -1,0 +1,18 @@
+Y Show me electricity demand for August 2026.
+Y Compare August 2026 demand with August 2025.
+Y Compare this summer with last summer.
+Y Show monthly demand for the last two years.
+N Show average daily power prices for August.
+N Compare August prices with last August.
+N Show me the biggest price spikes this summer.
+N Show monthly average prices over the last two years.
+N Show the generation mix for August.
+N How did solar and wind change this summer?
+N Compare the generation mix this summer with last summer.
+N Show gas, wind, solar, coal and nuclear over the last year.
+Y Show outages by month for the last year.
+Y Were outages higher this summer than last summer?
+Y Show the worst outage periods.
+Y Show available capacity versus demand for August.
+Y When did the grid have the least spare capacity?
+Y Compare reserve margin this summer with last summer.
