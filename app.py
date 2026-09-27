@@ -31,7 +31,6 @@ from geventwebsocket import WebSocketServer
 
 ROOT = Path(__file__).resolve().parent
 
-APP_DIR = ROOT / "app"
 IMG_DIR = ROOT / "img"
 DUN_DIR = ROOT / "dun"
 
@@ -1654,8 +1653,8 @@ def app_redirect():
 @app.get("/app/")
 def app_index():
     return static_file(
-        "index.html",
-        root=str(APP_DIR),
+        "app_index.html",
+        root=str(ROOT),
     )
 
 

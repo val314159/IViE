@@ -1,0 +1,803 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>IViE — Interactive Visualization Engine</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    #input {
+      min-height: 3.5rem;
+      max-height: 10rem;
+    }
+
+    .bubble {
+      transition:
+        opacity 180ms ease,
+        padding 180ms ease,
+        margin 180ms ease,
+        font-size 180ms ease;
+    }
+
+    .bubble.compact {
+      opacity: .58;
+      font-size: .78rem;
+      padding-top: .4rem;
+      padding-bottom: .4rem;
+      margin-top: .3rem;
+      margin-bottom: .3rem;
+    }
+
+    .bubble.internal {
+      font-size: .72rem;
+      opacity: .68;
+    }
+  </style>
+</head>
+
+<body class="bg-slate-950 text-slate-100 min-h-screen">
+
+  <!-- Header -->
+  <header class="h-16 border-b border-slate-800 flex items-center px-6">
+    <div class="flex items-center gap-4 min-w-0">
+      <div class="text-2xl font-bold tracking-tight">IViE</div>
+      <div class="text-sm text-slate-400 hidden sm:block">
+        Interactive Visualization Engine
+      </div>
+      <div class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-400">
+        ERCOT
+      </div>
+    </div>
+
+    <div class="ml-auto flex items-center gap-2 text-sm">
+      <span id="statusDot" class="w-2.5 h-2.5 rounded-full bg-red-500"></span>
+      <span id="status">Connecting</span>
+    </div>
+  </header>
+
+  <!-- Main -->
+  <main
+    class="grid grid-cols-1 lg:grid-cols-[36%_64%]"
+    style="height: calc(100vh - 4rem)"
+  >
+
+    <!-- Left: conversation + input -->
+    <section class="min-h-0 flex flex-col border-r border-slate-800">
+
+      <div
+        id="conversation"
+        class="flex-1 min-h-0 overflow-y-auto p-5 space-y-3"
+      >
+        <div id="emptyConversation" class="text-slate-500 text-sm">
+          Ask IViE about demand, prices, generation, outages, or grid capacity.
+        </div>
+      </div>
+
+      <div class="border-t border-slate-800 p-4 bg-slate-900/60">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-xs uppercase tracking-wider text-slate-500">Input</span>
+          <span id="micStatus" class="text-xs text-slate-500">Voice off</span>
+        </div>
+
+        <div
+          class="rounded-xl border border-slate-700 bg-slate-950
+                 focus-within:border-cyan-500 overflow-hidden"
+        >
+          <textarea
+            id="input"
+            rows="2"
+            class="block w-full resize-none overflow-y-auto
+                   bg-transparent px-4 pt-3 pb-1 text-base outline-none"
+            placeholder="Ask IViE..."
+          ></textarea>
+
+          <div
+            id="interim"
+            class="min-h-6 px-4 pb-3 text-cyan-300 italic text-sm"
+          ></div>
+        </div>
+
+        <div class="flex items-center gap-2 mt-3">
+          <button
+            id="voice"
+            type="button"
+            class="h-11 px-4 rounded-lg bg-slate-800 hover:bg-slate-700
+                   text-sm font-medium"
+          >
+            Start voice
+          </button>
+
+          <button
+            id="send"
+            type="button"
+            disabled
+            class="h-11 px-6 rounded-lg ml-auto bg-cyan-400 text-slate-950
+                   font-bold hover:bg-cyan-300 disabled:opacity-30
+                   disabled:cursor-not-allowed"
+          >
+            Send
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Right: visualization -->
+    <section class="min-h-0 bg-slate-900 flex items-center justify-center p-5">
+      <div id="chartEmpty" class="text-center text-slate-500">
+        <div class="text-5xl mb-4 opacity-30">IViE</div>
+        <div>Your visualization will appear here.</div>
+      </div>
+
+      <img
+        id="chart"
+        class="hidden max-w-full max-h-full rounded-xl bg-white object-contain"
+        alt="IViE visualization"
+      >
+    </section>
+  </main>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+
+  const conversation = $("conversation");
+  const emptyConversation = $("emptyConversation");
+  const input = $("input");
+  const interim = $("interim");
+  const voiceBtn = $("voice");
+  const sendBtn = $("send");
+  const statusEl = $("status");
+  const statusDot = $("statusDot");
+  const micStatus = $("micStatus");
+  const chart = $("chart");
+  const chartEmpty = $("chartEmpty");
+
+  const wsScheme = location.protocol === "https:" ? "wss" : "ws";
+
+  // =======================================================
+  // State
+  // =======================================================
+
+  let appWs = null;
+  let audioWs = null;
+  let appState = "disconnected";
+
+  let reconnectAttempt = 0;
+  let reconnectTimer = null;
+  const reconnectDelays = [0, 500, 1000, 2000, 4000];
+
+  let currentKind = null;
+  let currentInternal = null;
+  let currentChatter = null;
+  let currentSummary = null;
+  let currentCommentary = null;
+  let currentFinal = null;
+
+  let ttsBuffer = "";
+  const pendingSpeech = [];
+
+  // =======================================================
+  // Status: green ready, yellow working, red disconnected
+  // =======================================================
+
+  function setState(state, text) {
+    appState = state;
+    statusEl.textContent = text;
+
+    statusDot.className =
+      "w-2.5 h-2.5 rounded-full " +
+      (state === "ready"
+        ? "bg-green-500"
+        : state === "working"
+        ? "bg-yellow-400"
+        : "bg-red-500");
+
+    sendBtn.disabled = state !== "ready";
+  }
+
+  // =======================================================
+  // Conversation
+  // =======================================================
+
+  const bubbleStyles = {
+    user:
+      "bg-amber-950/50 border-amber-700/40 text-amber-100",
+    internal:
+      "internal bg-orange-950/30 border-orange-800/30 text-orange-300 italic",
+    chatter:
+      "bg-orange-950/45 border-orange-700/35 text-orange-200",
+    summary:
+      "bg-blue-950/45 border-blue-700/35 text-blue-200 italic",
+    commentary:
+      "bg-violet-950/45 border-violet-700/35 text-violet-200",
+    final:
+      "bg-emerald-950/45 border-emerald-700/35 text-emerald-100"
+  };
+
+  const bubbleLabels = {
+    user: "You",
+    internal: "Thinking",
+    chatter: "Working",
+    summary: "Analysis",
+    commentary: "IViE",
+    final: "IViE"
+  };
+
+  function clearEmpty() {
+    emptyConversation?.remove();
+  }
+
+  function createBubble(kind, text = "") {
+    clearEmpty();
+
+    const wrap = document.createElement("div");
+    wrap.className =
+      `bubble rounded-xl border px-4 py-3 ${bubbleStyles[kind]}`;
+
+    const label = document.createElement("div");
+    label.className =
+      "text-[11px] uppercase tracking-wider opacity-60 mb-1";
+    label.textContent = bubbleLabels[kind];
+
+    const body = document.createElement("div");
+    body.className = "whitespace-pre-wrap leading-relaxed";
+    body.textContent = text;
+
+    wrap.append(label, body);
+    conversation.appendChild(wrap);
+    scrollConversation();
+
+    return { wrap, body, kind };
+  }
+
+  function scrollConversation() {
+    conversation.scrollTop = conversation.scrollHeight;
+  }
+
+  function appendBubble(ref, text) {
+    ref.body.textContent += text;
+    scrollConversation();
+  }
+
+  function removeInternal() {
+    if (!currentInternal) return;
+    currentInternal.wrap.remove();
+    currentInternal = null;
+  }
+
+  function compact(ref) {
+    ref?.wrap.classList.add("compact");
+  }
+
+  function beginTurn(text) {
+    currentKind = null;
+    currentInternal = null;
+    currentChatter = null;
+    currentSummary = null;
+    currentCommentary = null;
+    currentFinal = null;
+    ttsBuffer = "";
+
+    createBubble("user", text);
+  }
+
+  function handleText(kind, text) {
+    if (!text) return;
+
+    // Internal is deliberately tiny and ephemeral. As soon as
+    // Codex moves to another kind, remove it completely.
+    if (currentKind === "internal" && kind !== "internal") {
+      removeInternal();
+    }
+
+    currentKind = kind;
+
+    switch (kind) {
+      case "internal":
+        if (!currentInternal)
+          currentInternal = createBubble("internal");
+        appendBubble(currentInternal, text);
+        break;
+
+      case "chatter":
+        if (!currentChatter)
+          currentChatter = createBubble("chatter");
+        appendBubble(currentChatter, text);
+        break;
+
+      case "summary":
+        compact(currentChatter);
+        if (!currentSummary)
+          currentSummary = createBubble("summary");
+        appendBubble(currentSummary, text);
+        break;
+
+      case "commentary":
+        compact(currentChatter);
+        compact(currentSummary);
+        if (!currentCommentary)
+          currentCommentary = createBubble("commentary");
+        appendBubble(currentCommentary, text);
+        break;
+
+      case "final":
+        compact(currentChatter);
+        compact(currentSummary);
+        compact(currentCommentary);
+        if (!currentFinal)
+          currentFinal = createBubble("final");
+        appendBubble(currentFinal, text);
+        queueSpeech(text);
+        break;
+    }
+  }
+
+  // =======================================================
+  // Application WebSocket
+  // =======================================================
+
+  function connectApp() {
+    clearTimeout(reconnectTimer);
+
+    const ws = new WebSocket(`${wsScheme}://${location.host}/app/ws`);
+    appWs = ws;
+
+    ws.onopen = () => {
+      if (ws !== appWs) return;
+      reconnectAttempt = 0;
+      // Snapshot follows immediately and provides authoritative busy state.
+      setState("ready", "Ready");
+    };
+
+    ws.onmessage = event => {
+      if (ws !== appWs) return;
+
+      let msg;
+      try {
+        msg = JSON.parse(event.data);
+      } catch {
+        return;
+      }
+
+      handleAppMessage(msg);
+    };
+
+    ws.onclose = () => {
+      if (ws !== appWs) return;
+      appWs = null;
+      setState("disconnected", "Reconnecting");
+      scheduleReconnect();
+    };
+
+    ws.onerror = () => {};
+  }
+
+  function scheduleReconnect() {
+    const delay = reconnectDelays[
+      Math.min(reconnectAttempt, reconnectDelays.length - 1)
+    ];
+
+    reconnectAttempt++;
+    reconnectTimer = setTimeout(connectApp, delay);
+  }
+
+  function handleAppMessage(msg) {
+    switch (msg.type) {
+      case "snapshot":
+        setState(
+          msg.busy ? "working" : "ready",
+          msg.busy ? (msg.status || "Working") : "Ready"
+        );
+
+        if (msg.chart) showChart(msg.chart);
+
+        // A reconnect snapshot contains only accumulated FINAL text.
+        if (msg.text && !currentFinal) {
+          currentFinal = createBubble("final", msg.text);
+          currentKind = "final";
+        }
+        break;
+
+      case "status":
+        // While a turn is active, status text changes but color stays yellow.
+        if (appState !== "disconnected") {
+          setState(
+            appState === "ready" ? "ready" : "working",
+            msg.text || (appState === "ready" ? "Ready" : "Working")
+          );
+        }
+        break;
+
+      case "text":
+        handleText(msg.kind, msg.text || "");
+        break;
+
+      case "chart":
+        showChart(msg.url);
+        break;
+
+      case "done":
+        removeInternal();
+        flushSpeech(true);
+        setState("ready", "Ready");
+        break;
+
+      case "error":
+        removeInternal();
+        setState("ready", "Ready");
+        createBubble("chatter", `Error: ${msg.text || "Unknown error"}`);
+        break;
+    }
+  }
+
+  // =======================================================
+  // Chart
+  // =======================================================
+
+  function showChart(url) {
+    if (!url) return;
+    chart.src = `${url}?t=${Date.now()}`;
+    chart.classList.remove("hidden");
+    chartEmpty.classList.add("hidden");
+  }
+
+  // =======================================================
+  // Input
+  // =======================================================
+
+  function autoGrowInput() {
+    input.style.height = "auto";
+    input.style.height = `${Math.min(input.scrollHeight, 160)}px`;
+  }
+
+  input.addEventListener("input", autoGrowInput);
+
+  function completeInput() {
+    return [input.value.trim(), interim.textContent.trim()]
+      .filter(Boolean)
+      .join(" ")
+      .trim();
+  }
+
+  function sendQuestion() {
+    if (appState !== "ready") return;
+    if (!appWs || appWs.readyState !== WebSocket.OPEN) return;
+
+    const text = completeInput();
+    if (!text) return;
+
+    ensureAudio();
+    beginTurn(text);
+
+    appWs.send(JSON.stringify({
+      type: "ask",
+      text
+    }));
+
+    input.value = "";
+    interim.textContent = "";
+    autoGrowInput();
+
+    setState("working", "Working");
+    restartRecognitionAfterSend();
+  }
+
+  sendBtn.addEventListener("click", sendQuestion);
+
+  document.addEventListener("keydown", event => {
+    if (event.code !== "Space") return;
+
+    const el = document.activeElement;
+    if (
+      el &&
+      (el.tagName === "INPUT" ||
+       el.tagName === "TEXTAREA" ||
+       el.isContentEditable)
+    ) return;
+
+    event.preventDefault();
+    sendQuestion();
+  });
+
+  // =======================================================
+  // Browser streaming speech recognition
+  // =======================================================
+
+  const SpeechRecognition =
+    window.SpeechRecognition ||
+    window.webkitSpeechRecognition;
+
+  let recognition = null;
+  let voiceWanted = false;
+  let recognitionRunning = false;
+  let discardRecognition = false;
+  let recognitionResumeAt = 0;
+
+  function appendCommitted(text) {
+    text = text.trim();
+    if (!text) return;
+
+    const old = input.value.trim();
+    input.value = old ? `${old} ${text}` : text;
+    autoGrowInput();
+    input.scrollTop = input.scrollHeight;
+  }
+
+  function recognitionSuppressed() {
+    return (
+      discardRecognition ||
+      Date.now() < recognitionResumeAt ||
+      isSpeaking()
+    );
+  }
+
+  function startRecognition() {
+    if (!recognition || !voiceWanted || recognitionRunning) return;
+
+    const wait = recognitionResumeAt - Date.now();
+    if (wait > 0) {
+      setTimeout(startRecognition, wait + 10);
+      return;
+    }
+
+    try {
+      recognition.start();
+    } catch {}
+  }
+
+  function restartRecognitionAfterSend() {
+    if (!recognition || !voiceWanted) return;
+
+    discardRecognition = true;
+    recognitionResumeAt = Date.now() + 300;
+
+    try {
+      recognition.stop();
+    } catch {}
+
+    interim.textContent = "";
+  }
+
+  if (SpeechRecognition) {
+    recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = "en-US";
+    recognition.maxAlternatives = 1;
+
+    recognition.onstart = () => {
+      recognitionRunning = true;
+      voiceBtn.textContent = "Stop voice";
+      micStatus.textContent = "Listening";
+    };
+
+    recognition.onend = () => {
+      recognitionRunning = false;
+
+      if (!voiceWanted) {
+        voiceBtn.textContent = "Start voice";
+        micStatus.textContent = "Voice off";
+        return;
+      }
+
+      const delay = Math.max(50, recognitionResumeAt - Date.now());
+      setTimeout(() => {
+        discardRecognition = false;
+        startRecognition();
+      }, delay);
+    };
+
+    recognition.onresult = event => {
+      if (recognitionSuppressed()) return;
+
+      let live = "";
+
+      for (let i = event.resultIndex; i < event.results.length; i++) {
+        const result = event.results[i];
+        const text = result[0].transcript;
+
+        if (result.isFinal)
+          appendCommitted(text);
+        else
+          live += text;
+      }
+
+      interim.textContent = live.trim();
+    };
+
+    recognition.onerror = event => {
+      if (
+        event.error === "not-allowed" ||
+        event.error === "service-not-allowed"
+      ) {
+        voiceWanted = false;
+        voiceBtn.disabled = true;
+        voiceBtn.textContent = "Voice unavailable";
+        micStatus.textContent = "Microphone denied";
+      }
+    };
+
+    voiceBtn.addEventListener("click", async () => {
+      await ensureAudio();
+      voiceWanted = !voiceWanted;
+
+      if (voiceWanted) {
+        discardRecognition = false;
+        recognitionResumeAt = 0;
+        startRecognition();
+      } else {
+        interim.textContent = "";
+        try {
+          recognition.stop();
+        } catch {}
+        voiceBtn.textContent = "Start voice";
+        micStatus.textContent = "Voice off";
+      }
+    });
+  } else {
+    voiceBtn.disabled = true;
+    voiceBtn.textContent = "Voice unavailable";
+    micStatus.textContent = "Unsupported browser";
+  }
+
+  // =======================================================
+  // MeloYelo websocket
+  // =======================================================
+
+  let audioReconnectTimer = null;
+
+  function connectAudio() {
+    clearTimeout(audioReconnectTimer);
+
+    if (
+      audioWs &&
+      (audioWs.readyState === WebSocket.OPEN ||
+       audioWs.readyState === WebSocket.CONNECTING)
+    ) return;
+
+    const ws = new WebSocket(`${wsScheme}://${location.host}/audiows`);
+    ws.binaryType = "arraybuffer";
+    audioWs = ws;
+
+    ws.onopen = () => {
+      if (ws !== audioWs) return;
+      while (pendingSpeech.length)
+        ws.send(pendingSpeech.shift());
+    };
+
+    ws.onmessage = event => {
+      if (ws !== audioWs) return;
+
+      // app.py strips timing metadata. Text frames are controls (EOF).
+      if (typeof event.data === "string") return;
+      schedulePcm(event.data);
+    };
+
+    ws.onclose = () => {
+      if (ws !== audioWs) return;
+      audioWs = null;
+      audioReconnectTimer = setTimeout(connectAudio, 1000);
+    };
+
+    ws.onerror = () => {};
+  }
+
+  function sendSpeech(text) {
+    text = text.trim();
+    if (!text) return;
+
+    if (audioWs && audioWs.readyState === WebSocket.OPEN) {
+      audioWs.send(text);
+      return;
+    }
+
+    pendingSpeech.push(text);
+    connectAudio();
+  }
+
+  // =======================================================
+  // Final response -> MeloYelo micro-streaming
+  // =======================================================
+
+  function wordCount(text) {
+    const words = text.trim().match(/\S+/g);
+    return words ? words.length : 0;
+  }
+
+  function queueSpeech(delta) {
+    ttsBuffer += delta;
+    flushSpeech(false);
+  }
+
+  function flushSpeech(force) {
+    while (ttsBuffer.trim()) {
+      const match = ttsBuffer.match(/^([\s\S]*?[.!?;:])(?:\s+|$)/);
+
+      if (match && wordCount(match[1]) >= 3) {
+        const chunk = match[1].trim();
+        ttsBuffer = ttsBuffer.slice(match[0].length);
+        sendSpeech(chunk);
+        continue;
+      }
+
+      if (wordCount(ttsBuffer) >= 12) {
+        const words = ttsBuffer.trim().split(/\s+/);
+        const chunk = words.slice(0, 10).join(" ");
+        ttsBuffer = words.slice(10).join(" ");
+        sendSpeech(chunk);
+        continue;
+      }
+
+      if (force) {
+        sendSpeech(ttsBuffer);
+        ttsBuffer = "";
+      }
+
+      break;
+    }
+  }
+
+  // =======================================================
+  // Streaming PCM16 playback
+  // =======================================================
+
+  const SAMPLE_RATE = 44100;
+  let audioContext = null;
+  let playbackEnd = 0;
+
+  async function ensureAudio() {
+    if (!audioContext) {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (!AC) return;
+
+      audioContext = new AC({ sampleRate: SAMPLE_RATE });
+      playbackEnd = audioContext.currentTime;
+    }
+
+    if (audioContext.state === "suspended")
+      await audioContext.resume();
+  }
+
+  function schedulePcm(arrayBuffer) {
+    if (!audioContext) return;
+
+    const pcm = new Int16Array(arrayBuffer);
+    const samples = new Float32Array(pcm.length);
+
+    for (let i = 0; i < pcm.length; i++)
+      samples[i] = pcm[i] / 32768;
+
+    const buffer = audioContext.createBuffer(
+      1,
+      samples.length,
+      SAMPLE_RATE
+    );
+
+    buffer.copyToChannel(samples, 0);
+
+    const source = audioContext.createBufferSource();
+    source.buffer = buffer;
+    source.connect(audioContext.destination);
+
+    const start = Math.max(playbackEnd, audioContext.currentTime);
+    source.start(start);
+    playbackEnd = start + buffer.duration;
+  }
+
+  function isSpeaking() {
+    if (!audioContext) return false;
+    return audioContext.currentTime < playbackEnd + 0.300;
+  }
+
+  // =======================================================
+  // Start
+  // =======================================================
+
+  autoGrowInput();
+  connectApp();
+  connectAudio();
+})();
+</script>
+
+</body>
+</html>
