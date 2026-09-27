@@ -369,7 +369,9 @@
       scheduleReconnect();
     };
 
-    ws.onerror = () => {};
+  ws.onerror = () => {
+    console.error("Websocket:", event.error, event.message);
+  };
   }
 
   function scheduleReconnect() {
@@ -605,7 +607,7 @@
       interim.textContent = live.trim();
     };
 
-    recognition.onerror = event => {
+    recognition.onerror = event => {/*
       if (
         event.error === "not-allowed" ||
         event.error === "service-not-allowed"
@@ -614,7 +616,12 @@
         voiceBtn.disabled = true;
         voiceBtn.textContent = "Voice unavailable";
         micStatus.textContent = "Microphone denied";
-      }
+    }
+*/    
+  console.error("Speech recognition:", event.error, event.message);
+  voiceWanted = false; // Stop automatic retries after an error.
+  discardRecognition = false;
+  interim.textContent = `Speech error: ${event.error}`;
     };
 
     voiceBtn.addEventListener("click", async () => {

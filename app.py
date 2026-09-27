@@ -1264,7 +1264,10 @@ class CodexBridge:
 
 codex = CodexBridge()
 
-
+@app.route("/favicon.ico")
+def favicon_ico():
+    return []
+    
 # ============================================================
 # Browser application WebSocket
 #
