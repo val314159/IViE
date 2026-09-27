@@ -86,6 +86,56 @@ latest_chart = None
 
 
 # ============================================================
+# Browser text kinds
+#
+# Every streamed text event sent to the browser has this shape:
+#
+#   {
+#       "type": "text",
+#       "kind": <kind>,
+#       "text": <text>
+#   }
+#
+# Kinds:
+#
+#   internal
+#       Realtime activity driven by item/reasoning/textDelta.
+#       This is deliberately transient. The browser should render
+#       it small and delete the bubble when another kind arrives.
+#
+#   summary
+#       item/reasoning/summaryTextDelta. Streamed concise reasoning
+#       summary. Display it, but do not speak it.
+#
+#   commentary
+#       item/agentMessage/delta whose agentMessage item has
+#       phase="commentary". Display it, but do not speak it.
+#
+#   final
+#       item/agentMessage/delta whose phase is "final_answer" or
+#       absent/null. This is the actual answer. Display it and send
+#       it to MeloYelo in the browser.
+#
+#   chatter
+#       IViE-generated tool/activity messages such as command
+#       execution. Display it as lightweight progress; do not speak.
+#
+# Only final text is accumulated in current_text so reconnect
+# snapshots contain the actual answer, not transient working text.
+# ============================================================
+
+def send_text(kind, text):
+    if not text:
+        return
+
+    send_app({
+        "type": "text",
+        "kind": kind,
+        "text": text,
+    })
+
+
+# ============================================================
 # Browser outbound queue
 #
 # Exactly ONE greenlet writes to the application websocket.
@@ -257,6 +307,16 @@ class CodexBridge:
         self.thread_id = None
         self.active_turn_id = None
 
+        # agentMessage item id -> commentary/final_answer/None
+        self.item_phases = {}
+
+        # Agent-message items that already streamed deltas.
+        # Used to avoid duplicating text on item/completed.
+        self.streamed_agent_items = set()
+
+        # Last browser text kind emitted during this turn.
+        self.last_text_kind = None
+
         self.proc = Popen(
             [
                 CODEX_BIN,
@@ -313,6 +373,14 @@ class CodexBridge:
 
     def _send(self, msg):
         self.outbox.put(msg)
+
+
+    def _send_text(self, kind, text):
+        if not text:
+            return
+
+        self.last_text_kind = kind
+        send_text(kind, text)
 
 
     # --------------------------------------------------------
@@ -522,6 +590,10 @@ class CodexBridge:
 
         self.active_turn_id = None
 
+        self.item_phases.clear()
+        self.streamed_agent_items.clear()
+        self.last_text_kind = None
+
         set_status(
             "Thinking…"
         )
@@ -532,6 +604,11 @@ class CodexBridge:
                 {
                     "threadId":
                         self.thread_id,
+
+                    # Codex 0.154.0 TurnStartParams supports
+                    # reasoning summaries directly.
+                    "summary":
+                        "concise",
 
                     "input": [
                         {
@@ -754,15 +831,154 @@ class CodexBridge:
 
 
         # ----------------------------------------
-        # Streaming assistant text
+        # INTERNAL
         #
-        # 0.154.0:
+        # Codex emits item/reasoning/textDelta while
+        # internal reasoning is active. We use the
+        # stream as immediate UI activity, but do not
+        # forward private scratch reasoning verbatim.
         #
-        # params:
-        #   threadId
-        #   turnId
-        #   itemId
-        #   delta
+        # Emit only when entering internal so a long
+        # reasoning burst doesn't spam the browser.
+        # ----------------------------------------
+
+        if (
+            method
+            ==
+            "item/reasoning/textDelta"
+        ):
+
+            if (
+                self.last_text_kind
+                !=
+                "internal"
+            ):
+                self._send_text(
+                    "internal",
+                    "Thinking…",
+                )
+
+            return
+
+
+        # ----------------------------------------
+        # SUMMARY
+        # ----------------------------------------
+
+        if (
+            method
+            ==
+            "item/reasoning/summaryTextDelta"
+        ):
+
+            delta = params.get(
+                "delta",
+                "",
+            )
+
+            self._send_text(
+                "summary",
+                delta,
+            )
+
+            return
+
+
+        # ----------------------------------------
+        # Item started
+        #
+        # agentMessage delta notifications do not
+        # contain phase, so remember phase by itemId.
+        #
+        # Tool starts also feed CHATTER so the UI has
+        # immediate visible activity.
+        # ----------------------------------------
+
+        if method == "item/started":
+
+            item = (
+                params.get("item")
+                or {}
+            )
+
+            item_type = item.get(
+                "type"
+            )
+
+
+            if (
+                item_type
+                ==
+                "agentMessage"
+            ):
+
+                item_id = item.get(
+                    "id"
+                )
+
+                if item_id:
+                    self.item_phases[
+                        item_id
+                    ] = item.get(
+                        "phase"
+                    )
+
+
+            elif (
+                item_type
+                ==
+                "commandExecution"
+            ):
+
+                self._send_text(
+                    "chatter",
+                    "Running analysis…",
+                )
+
+                set_status(
+                    "Analyzing ERCOT data…"
+                )
+
+
+            elif item_type == "webSearch":
+
+                self._send_text(
+                    "chatter",
+                    "Searching…",
+                )
+
+
+            elif (
+                item_type
+                ==
+                "mcpToolCall"
+            ):
+
+                self._send_text(
+                    "chatter",
+                    "Using a data source…",
+                )
+
+
+            elif (
+                item_type
+                ==
+                "dynamicToolCall"
+            ):
+
+                self._send_text(
+                    "chatter",
+                    "Running a tool…",
+                )
+
+            return
+
+
+        # ----------------------------------------
+        # COMMENTARY / FINAL
+        #
+        # Same Codex delta method. Distinguish it
+        # using the phase captured from item/started.
         # ----------------------------------------
 
         if (
@@ -779,12 +995,43 @@ class CodexBridge:
             if not delta:
                 return
 
+
+            item_id = params.get(
+                "itemId"
+            )
+
+            if item_id:
+                self.streamed_agent_items.add(
+                    item_id
+                )
+
+
+            phase = self.item_phases.get(
+                item_id
+            )
+
+
+            if phase == "commentary":
+
+                self._send_text(
+                    "commentary",
+                    delta,
+                )
+
+                return
+
+
+            # final_answer OR missing/null phase.
+            # Codex notes that phase may be absent,
+            # so unknown phase gets compatibility
+            # behavior and is treated as final text.
+
             current_text += delta
 
-            send_app({
-                "type": "delta",
-                "text": delta,
-            })
+            self._send_text(
+                "final",
+                delta,
+            )
 
             set_status(
                 "Responding…"
@@ -794,33 +1041,10 @@ class CodexBridge:
 
 
         # ----------------------------------------
-        # Tool execution starting
-        # ----------------------------------------
-
-        if method == "item/started":
-
-            item = (
-                params.get("item")
-                or {}
-            )
-
-            if (
-                item.get("type")
-                ==
-                "commandExecution"
-            ):
-                set_status(
-                    "Analyzing ERCOT data…"
-                )
-
-            return
-
-
-        # ----------------------------------------
-        # Fallback final agent message
+        # Item completed
         #
-        # Normally deltas have already populated
-        # current_text.
+        # Fallback for agent messages that completed
+        # without streaming delta notifications.
         # ----------------------------------------
 
         if method == "item/completed":
@@ -830,25 +1054,80 @@ class CodexBridge:
                 or {}
             )
 
+            item_type = item.get(
+                "type"
+            )
+
+            item_id = item.get(
+                "id"
+            )
+
+
             if (
-                item.get("type")
+                item_type
                 ==
                 "agentMessage"
-                and
-                not current_text
             ):
-                text = item.get(
-                    "text",
-                    "",
+
+                phase = item.get(
+                    "phase"
                 )
 
-                if text:
-                    current_text = text
+                if item_id:
+                    self.item_phases[
+                        item_id
+                    ] = phase
 
-                    send_app({
-                        "type": "delta",
-                        "text": text,
-                    })
+
+                if (
+                    item_id
+                    not in
+                    self.streamed_agent_items
+                ):
+
+                    text = item.get(
+                        "text",
+                        "",
+                    )
+
+                    if text:
+
+                        if (
+                            phase
+                            ==
+                            "commentary"
+                        ):
+
+                            self._send_text(
+                                "commentary",
+                                text,
+                            )
+
+                        else:
+
+                            current_text += text
+
+                            self._send_text(
+                                "final",
+                                text,
+                            )
+
+
+            elif (
+                item_type
+                ==
+                "commandExecution"
+            ):
+
+                status = item.get(
+                    "status"
+                )
+
+                if status == "completed":
+                    self._send_text(
+                        "chatter",
+                        "Analysis step complete.",
+                    )
 
             return
 
@@ -887,12 +1166,8 @@ class CodexBridge:
                 })
 
             else:
-                current_status_value = (
-                    "Ready"
-                )
-
                 set_status(
-                    current_status_value
+                    "Ready"
                 )
 
                 send_app({
